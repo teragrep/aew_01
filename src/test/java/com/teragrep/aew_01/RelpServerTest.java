@@ -1,0 +1,299 @@
+/*
+ * RELP bridge for Microsoft Azure EventHub (aew_01)
+ * Copyright (C) 2021-2026 Suomen Kanuuna Oy
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ *
+ * Additional permission under GNU Affero General Public License version 3
+ * section 7
+ *
+ * If you modify this Program, or any covered work, by linking or combining it
+ * with other code, such other code is not for that reason alone subject to any
+ * of the requirements of the GNU Affero GPL version 3 as long as this Program
+ * is the same Program as licensed from Suomen Kanuuna Oy without any additional
+ * modifications.
+ *
+ * Supplemented terms under GNU Affero General Public License version 3
+ * section 7
+ *
+ * Origin of the software must be attributed to Suomen Kanuuna Oy. Any modified
+ * versions must be marked as "Modified version of" The Program.
+ *
+ * Names of the licensors and authors may not be used for publicity purposes.
+ *
+ * No rights are granted for use of trade names, trademarks, or service marks
+ * which are in The Program if any.
+ *
+ * Licensee must indemnify licensors and authors for any liability that these
+ * contractual assumptions impose on licensors and authors.
+ *
+ * To the extent this program is licensed as part of the Commercial versions of
+ * Teragrep, the applicable Commercial License may apply to this file if you as
+ * a licensee so wish it.
+ */
+package com.teragrep.aew_01;
+
+import com.codahale.metrics.Meter;
+import com.codahale.metrics.MetricRegistry;
+import com.teragrep.net_01.channel.buffer.writable.Writeable;
+import com.teragrep.rlp_01.RelpBatch;
+import com.teragrep.rlp_01.RelpCommand;
+import com.teragrep.rlp_01.RelpConnection;
+import com.teragrep.rlp_03.frame.RelpFrame;
+import com.teragrep.rlp_03.frame.RelpFrameFactory;
+import com.teragrep.rlp_03.frame.delegate.FrameContext;
+import com.teragrep.rlp_03.frame.delegate.event.RelpEvent;
+import com.teragrep.rlp_03.frame.delegate.event.RelpEventClose;
+import com.teragrep.rlp_03.frame.delegate.event.RelpEventOpen;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.concurrent.TimeoutException;
+
+class RelpServerTest {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(RelpServerTest.class);
+
+    @Test
+    void testRun() {
+        MetricRegistry metricRegistry = new MetricRegistry();
+        Meter relpMeter = metricRegistry.meter("relpMeter");
+
+        final HashMap<String, RelpEvent> relpCommandConsumerMap = new HashMap<>();
+        relpCommandConsumerMap.put(RelpCommand.OPEN, new LoggingRelpEventOpen(new RelpEventOpen()));
+        relpCommandConsumerMap.put(RelpCommand.CLOSE, new RelpEventClose());
+        RelpEvent syslogRelpEvent = new RelpEvent() {
+
+            @Override
+            public void accept(FrameContext frameContext) {
+                final RelpFrame relpFrame = frameContext.relpFrame();
+                final RelpFrameFactory relpFrameFactory = new RelpFrameFactory();
+                final RelpFrame responseFrame = relpFrameFactory
+                        .create(frameContext.relpFrame().txn().toBytes(), "rsp", "200 OK");
+                final Writeable writeable = responseFrame.toWriteable();
+                try {
+                    frameContext.establishedContext().egress().accept(writeable);
+                }
+                catch (Exception ex) {
+                    LOGGER.error("Exception while writing response", ex);
+                }
+                relpFrame.close();
+                relpMeter.mark();
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        relpCommandConsumerMap.put(RelpCommand.SYSLOG, syslogRelpEvent);
+
+        // Use try-with-resources to make sure relp is autoclosed between each test
+        try (final RelpServer relpServer = new RelpServer(1601, relpCommandConsumerMap)) {
+            Thread relpThread = new Thread(relpServer);
+            relpThread.start();
+            // Wait for the server to start
+            relpServer.startCompletableFuture().join();
+            // send message to the RelpServer.
+            final RelpConnection relpConnection = new RelpConnection();
+            final int port = 1601;
+            Assertions.assertDoesNotThrow(() -> relpConnection.connect("localhost", port));
+            final RelpBatch relpBatch = new RelpBatch();
+            long reqId = relpBatch.insert("Hello World!".getBytes(StandardCharsets.UTF_8));
+            Assertions.assertAll(() -> relpConnection.commit(relpBatch));
+            // verify successful transaction
+            Assertions.assertTrue(relpBatch.verifyTransaction(reqId));
+            Assertions.assertAll(relpConnection::disconnect);
+            Assertions.assertEquals(1, relpMeter.getCount());
+        }
+    }
+
+    @Test
+    void testRun10000Batch() {
+        MetricRegistry metricRegistry = new MetricRegistry();
+        Meter relpMeter = metricRegistry.meter("relpMeter");
+
+        final HashMap<String, RelpEvent> relpCommandConsumerMap = new HashMap<>();
+        relpCommandConsumerMap.put(RelpCommand.OPEN, new LoggingRelpEventOpen(new RelpEventOpen()));
+        relpCommandConsumerMap.put(RelpCommand.CLOSE, new RelpEventClose());
+        RelpEvent syslogRelpEvent = new RelpEvent() {
+
+            @Override
+            public void accept(FrameContext frameContext) {
+                final RelpFrame relpFrame = frameContext.relpFrame();
+                final RelpFrameFactory relpFrameFactory = new RelpFrameFactory();
+                final RelpFrame responseFrame = relpFrameFactory
+                        .create(frameContext.relpFrame().txn().toBytes(), "rsp", "200 OK");
+                final Writeable writeable = responseFrame.toWriteable();
+                try {
+                    frameContext.establishedContext().egress().accept(writeable);
+                }
+                catch (Exception ex) {
+                    LOGGER.error("Exception while writing response", ex);
+                }
+                relpFrame.close();
+                relpMeter.mark();
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        relpCommandConsumerMap.put(RelpCommand.SYSLOG, syslogRelpEvent);
+
+        // Use try-with-resources to make sure relp is autoclosed between each test
+        try (final RelpServer relpServer = new RelpServer(1601, relpCommandConsumerMap)) {
+            Thread relpThread = new Thread(relpServer);
+            relpThread.start();
+            // Wait for the server to start
+            relpServer.startCompletableFuture().join();
+            // send message to the RelpServer.
+            final RelpConnection relpConnection = new RelpConnection();
+            final int port = 1601;
+            Assertions.assertDoesNotThrow(() -> relpConnection.connect("localhost", port));
+            final RelpBatch relpBatch = new RelpBatch();
+            List<Long> reqIds = new ArrayList<>();
+            for (int i = 1; i <= 10000; i++) {
+                String payload = "Hello World " + i;
+                reqIds.add(relpBatch.insert(payload.getBytes(StandardCharsets.UTF_8)));
+            }
+            Assertions.assertAll(() -> relpConnection.commit(relpBatch));
+            // verify successful transaction
+            for (Long reqId : reqIds) {
+                Assertions.assertTrue(relpBatch.verifyTransaction(reqId));
+            }
+            Assertions.assertAll(relpConnection::disconnect);
+            Assertions.assertEquals(10000, relpMeter.getCount());
+        }
+    }
+
+    @Test
+    void testRun100000Batch() {
+        MetricRegistry metricRegistry = new MetricRegistry();
+        Meter relpMeter = metricRegistry.meter("relpMeter");
+
+        final HashMap<String, RelpEvent> relpCommandConsumerMap = new HashMap<>();
+        relpCommandConsumerMap.put(RelpCommand.OPEN, new LoggingRelpEventOpen(new RelpEventOpen()));
+        relpCommandConsumerMap.put(RelpCommand.CLOSE, new RelpEventClose());
+        RelpEvent syslogRelpEvent = new RelpEvent() {
+
+            @Override
+            public void accept(FrameContext frameContext) {
+                final RelpFrame relpFrame = frameContext.relpFrame();
+                final RelpFrameFactory relpFrameFactory = new RelpFrameFactory();
+                final RelpFrame responseFrame = relpFrameFactory
+                        .create(frameContext.relpFrame().txn().toBytes(), "rsp", "200 OK");
+                final Writeable writeable = responseFrame.toWriteable();
+                try {
+                    frameContext.establishedContext().egress().accept(writeable);
+                }
+                catch (Exception ex) {
+                    LOGGER.error("Exception while writing response", ex);
+                }
+                relpFrame.close();
+                relpMeter.mark();
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        relpCommandConsumerMap.put(RelpCommand.SYSLOG, syslogRelpEvent);
+
+        // Use try-with-resources to make sure relp is autoclosed between each test
+        try (final RelpServer relpServer = new RelpServer(1601, relpCommandConsumerMap)) {
+            Thread relpThread = new Thread(relpServer);
+            relpThread.start();
+            // Wait for the server to start
+            relpServer.startCompletableFuture().join();
+            // send message to the RelpServer.
+            final RelpConnection relpConnection = new RelpConnection();
+            final int port = 1601;
+            Assertions.assertDoesNotThrow(() -> relpConnection.connect("localhost", port));
+            final RelpBatch relpBatch = new RelpBatch();
+            List<Long> reqIds = new ArrayList<>();
+            for (int i = 1; i <= 100000; i++) {
+                String payload = "Hello World " + i;
+                reqIds.add(relpBatch.insert(payload.getBytes(StandardCharsets.UTF_8)));
+            }
+            Assertions.assertAll(() -> relpConnection.commit(relpBatch));
+            // verify successful transaction
+            for (Long reqId : reqIds) {
+                Assertions.assertTrue(relpBatch.verifyTransaction(reqId));
+            }
+            Assertions.assertAll(relpConnection::disconnect);
+            Assertions.assertEquals(100000, relpMeter.getCount());
+        }
+    }
+
+    @Test
+    void testTimeoutException() {
+        MetricRegistry metricRegistry = new MetricRegistry();
+        Meter relpMeter = metricRegistry.meter("relpMeter");
+
+        final HashMap<String, RelpEvent> relpCommandConsumerMap = new HashMap<>();
+        relpCommandConsumerMap.put(RelpCommand.OPEN, new LoggingRelpEventOpen(new RelpEventOpen()));
+        relpCommandConsumerMap.put(RelpCommand.CLOSE, new RelpEventClose());
+        RelpEvent syslogRelpEvent = new RelpEvent() {
+
+            @Override
+            public void accept(FrameContext frameContext) {
+                // Sleep for 2 seconds to trigger RELP client timeout exception, emulating EventHub throttling.
+                Assertions.assertDoesNotThrow(() -> Thread.sleep(2000));
+                final RelpFrame relpFrame = frameContext.relpFrame();
+                final RelpFrameFactory relpFrameFactory = new RelpFrameFactory();
+                final RelpFrame responseFrame = relpFrameFactory
+                        .create(frameContext.relpFrame().txn().toBytes(), "rsp", "200 OK");
+                final Writeable writeable = responseFrame.toWriteable();
+                try {
+                    frameContext.establishedContext().egress().accept(writeable);
+                }
+                catch (Exception ex) {
+                    LOGGER.error("Exception while writing response", ex);
+                }
+                relpFrame.close();
+                relpMeter.mark();
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        relpCommandConsumerMap.put(RelpCommand.SYSLOG, syslogRelpEvent);
+
+        // Use try-with-resources to make sure relp is autoclosed between each test
+        try (final RelpServer relpServer = new RelpServer(1601, relpCommandConsumerMap)) {
+            Thread relpThread = new Thread(relpServer);
+            relpThread.start();
+            // Wait for the server to start
+            relpServer.startCompletableFuture().join();
+            // send message to the RelpServer.
+            final RelpConnection relpConnection = new RelpConnection();
+            relpConnection.setConnectionTimeout(1000);
+            relpConnection.setWriteTimeout(1000);
+            relpConnection.setReadTimeout(1000);
+            final int port = 1601;
+            Assertions.assertDoesNotThrow(() -> relpConnection.connect("localhost", port));
+            final RelpBatch relpBatch = new RelpBatch();
+            relpBatch.insert("Hello World!".getBytes(StandardCharsets.UTF_8));
+            Assertions.assertThrows(TimeoutException.class, () -> relpConnection.commit(relpBatch));
+        }
+    }
+}

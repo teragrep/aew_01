@@ -1,0 +1,167 @@
+/*
+ * RELP bridge for Microsoft Azure EventHub (aew_01)
+ * Copyright (C) 2021-2026 Suomen Kanuuna Oy
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ *
+ * Additional permission under GNU Affero General Public License version 3
+ * section 7
+ *
+ * If you modify this Program, or any covered work, by linking or combining it
+ * with other code, such other code is not for that reason alone subject to any
+ * of the requirements of the GNU Affero GPL version 3 as long as this Program
+ * is the same Program as licensed from Suomen Kanuuna Oy without any additional
+ * modifications.
+ *
+ * Supplemented terms under GNU Affero General Public License version 3
+ * section 7
+ *
+ * Origin of the software must be attributed to Suomen Kanuuna Oy. Any modified
+ * versions must be marked as "Modified version of" The Program.
+ *
+ * Names of the licensors and authors may not be used for publicity purposes.
+ *
+ * No rights are granted for use of trade names, trademarks, or service marks
+ * which are in The Program if any.
+ *
+ * Licensee must indemnify licensors and authors for any liability that these
+ * contractual assumptions impose on licensors and authors.
+ *
+ * To the extent this program is licensed as part of the Commercial versions of
+ * Teragrep, the applicable Commercial License may apply to this file if you as
+ * a licensee so wish it.
+ */
+package com.teragrep.aew_01;
+
+import com.teragrep.net_01.channel.socket.PlainFactory;
+import com.teragrep.net_01.channel.socket.SocketFactory;
+import com.teragrep.net_01.eventloop.EventLoop;
+import com.teragrep.net_01.eventloop.EventLoopFactory;
+import com.teragrep.net_01.server.ServerFactory;
+import com.teragrep.rlp_03.frame.FrameDelegationClockFactory;
+import com.teragrep.rlp_03.frame.delegate.FrameDelegate;
+import com.teragrep.rlp_03.frame.delegate.event.RelpEvent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.Supplier;
+
+public final class RelpServer implements Runnable, AutoCloseable {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(RelpServer.class);
+
+    private final ExecutorService executorService;
+    private final EventLoop eventLoop;
+    private final Thread eventLoopThread;
+    private final CompletableFuture<String> startCompletableFuture;
+
+    private final Supplier<FrameDelegate> frameDelegateSupplier;
+
+    private final SocketFactory socketFactory;
+
+    private final int port;
+
+    public RelpServer(final int port, final Map<String, RelpEvent> relpCommandConsumerMap) {
+        this(port, relpCommandConsumerMap, new PlainFactory());
+    }
+
+    public RelpServer(
+            final int port,
+            final Map<String, RelpEvent> relpCommandConsumerMap,
+            SocketFactory socketFactory
+    ) {
+        this.executorService = Executors.newVirtualThreadPerTaskExecutor();
+        this.port = port;
+        this.frameDelegateSupplier = new FrameDelegateSupplier(relpCommandConsumerMap).supply();
+        try {
+            eventLoop = new EventLoopFactory().create();
+        }
+        catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        eventLoopThread = new Thread(eventLoop);
+        startCompletableFuture = new CompletableFuture<>();
+        this.socketFactory = socketFactory;
+    }
+
+    @Override
+    public void run() {
+        eventLoopThread.start();
+        final ServerFactory serverFactory = new ServerFactory(
+                eventLoop,
+                executorService,
+                socketFactory,
+                new FrameDelegationClockFactory(frameDelegateSupplier)
+        );
+
+        try {
+            serverFactory.create(port);
+            LOGGER.debug("Waiting additional second just to make sure everything started properly");
+            try {
+                Thread.sleep(1000);
+            }
+            catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+            // Complete the future to notify all other running threads that server is ready.
+            startCompletableFuture.complete("Server started");
+        }
+        catch (IOException e) {
+            LOGGER.error("Failed to run: <[{}]>", e.getMessage(), e);
+            throw new UncheckedIOException(e);
+        }
+
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            LOGGER.debug("Stopping server at port <[{}]>", port);
+
+            latch.countDown();
+        }));
+
+        while (true)
+            try {
+                latch.await();
+                break;
+            }
+            catch (InterruptedException e) {
+                LOGGER.debug("Interruption in main thread latch.await(), retrying", e);
+            }
+    }
+
+    public CompletableFuture<String> startCompletableFuture() {
+        return startCompletableFuture;
+    }
+
+    @Override
+    public void close() {
+        eventLoop.stop();
+        try {
+            eventLoopThread.join();
+        }
+        catch (InterruptedException interruptedException) {
+            throw new RuntimeException(interruptedException);
+        }
+        LOGGER.debug("Server stopped at port <[{}]>", port);
+        executorService.shutdown();
+    }
+}

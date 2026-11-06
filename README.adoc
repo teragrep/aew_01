@@ -1,35 +1,88 @@
-// Before publishing your new repository:
-// 1. Write the readme file
-// 2. Update the issues link in Contributing section in the readme file
-// 3. Update the discussion link in config.yml file in .github/ISSUE_TEMPLATE directory
+= AEW_01: RELP bridge for Microsoft Azure EventHub
 
-= repo-template
+This package provides containerized application for continually receiving RELP messages and writing them to Microsoft Azure EventHub. The containerized application can be run on Microsoft Azure Container Apps platform.
 
-// Add a short description of your project. Tell what your project does and what it's used for.
+== Configuration
 
-This is a template repository for Teragrep organization.
+All the configurations for the application are made using following environment variables:
+----
+RELP_PORT=<Port used by the RELP server>
+RELP_TLS=<Boolean to enable or disable TLS for RELP, TRUE or FALSE>
+RELP_TLSKEYSTOREPASSWORD=<TLS keystore password for RELP server>
+RELP_TLSTRUSTSTOREPASSWORD=<TLS truststore password for RELP server>
+RELP_PROCESSINGTHREADS=<Number of theads allocated for RELP server>
+RELP_FRAMECONTEXTSCAPACITY=<Maximum size of the queue for deferred processing of RELP messages>
 
-== Features
+AZURE_NAMESPACE=<EventHub namespace>
+AZURE_EVENTHUB=<EventHub name>
+AZURE_CONNECTIONSTRING=<EventHub connection string>
+AZURE_USERMANAGEDIDENTITYCLIENTID=<EventHub client id>
+AZURE_CONNECTIONTYPE=<EventHub connection type, PASSWORDLESS or CONNECTIONSTRING>
 
-// List your project's features
+METRICS_PROMETHEUSPORT=<Port for Prometheus to deliver metrics>
+----
+
+If any of the configurations are missing from environment variables, an exception is thrown by the application. In certain configurations some of the variables are not used, in that case the said variables should be set to `N/A`.
+
+`RELP_PORT` variable defines the port used by the RELP server.
+
+`RELP_TLS` variable defines if TLS is enabled for the server or not.
+
+`RELP_TLSKEYSTOREPASSWORD` variable defines the keystore password for the TLS connection.
+
+`RELP_TLSTRUSTSTOREPASSWORD` variable defines the truststore password for the TLS connection.
+
+`RELP_PROCESSINGTHREADS` variable defines the amount of threads allocated for the RELP server.
+
+`RELP_FRAMECONTEXTSCAPACITY` variable defines the maximum size of the queue used for deferred processing of RELP messages.
+
+`AZURE_NAMESPACE` variable defines the EventHub namespace used by the AMQP connection.
+
+`AZURE_EVENTHUB` variable defines the EventHub name used by the AMQP connection.
+
+`AZURE_CONNECTIONSTRING` variable defines the connection string used for connecting to EventHub.
+
+`AZURE_USERMANAGEDIDENTITYCLIENTID` variable defines the passwordless client id used for connecting to EventHub.
+
+`AZURE_CONNECTIONTYPE` defines if the connection is done using either the `AZURE_CONNECTIONSTRING` or `AZURE_USERMANAGEDIDENTITYCLIENTID`.
+
+`METRICS_PROMETHEUSPORT` defines the port used by Prometheus for the application metrics.
 
 == Documentation
 
 See the official documentation on https://docs.teragrep.com[docs.teragrep.com].
 
-== Limitations
+== How to compile
 
-// If your project has limitations, please list them. Otherwise remove this section.
+Compile and run the tests by calling:
 
-== How to [compile/use/implement]
+----
+mvn clean install
+----
 
-// add instructions how people can start to use your project
+Tests use Podman and Testcontainers to emulate EventHub environment. If Testcontainers is unable to find a valid Docker environment, please make sure to install Podman and run the following commands:
+
+----
+systemctl start --user podman.socket;
+export DOCKER_HOST="unix:///run/user/$(id -u)/podman/podman.sock";
+----
+
+In case of podman testcontainers broken pipeline error, create or modify containers.conf file to fix it:
+(`/usr/share/containers/containers.conf`,
+`/etc/containers/containers.conf`,
+`$HOME/.config/containers/containers.conf`)
+
+Set the `service_timeout` to `0` in `[engine]` section:
+
+----
+[engine]
+service_timeout=0
+----
+
 
 == Contributing
 
-// Change the repository name in the issues link to match with your project's name
-
-You can involve yourself with our project by https://github.com/teragrep/repo-template/issues/new/choose[opening an issue] or submitting a pull request.
+You can involve yourself with our project by https://github.com/teragrep/aew_01/issues/new/choose[opening an issue] or submitting a pull request.
 
 Contribution requirements:
 
